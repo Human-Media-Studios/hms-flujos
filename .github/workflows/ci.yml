@@ -1,0 +1,116 @@
+# CI liviano de HMS (flujo reutilizable).
+#
+# Un solo trabajo: instala una vez, corre las revisiones rápidas (formato, tipos, unitarios, build)
+# y, si se pide, las E2E de Playwright con Chromium. Es la puerta del despliegue.
+# Lo pesado (Lighthouse, capturas visuales, accesibilidad) NO va aquí: va en revision.yml.
+#
+# Reglas de la skill flujos-github-hms que cumple: concurrency, timeout, caché por lockfile,
+# artefactos solo si falla y por 3 días, acciones fijadas por SHA.
+
+name: HMS · CI liviano
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Versión de Node.
+        type: string
+        default: "22"
+      lockfile:
+        description: Lockfile que define la llave de caché (npm y navegadores).
+        type: string
+        default: package-lock.json
+      php:
+        description: Instalar PHP (para pruebas que ejecutan el PHP real).
+        type: boolean
+        default: false
+      php-version:
+        type: string
+        default: "8.3"
+      php-extensions:
+        type: string
+        default: ""
+      comandos:
+        description: Script bash con las revisiones rápidas (una por línea). Corre después de npm ci.
+        type: string
+        required: true
+      playwright:
+        description: Instalar Chromium de Playwright (con caché) antes de las E2E.
+        type: boolean
+        default: false
+      e2e:
+        description: Comando de las pruebas E2E. Vacío = no hay E2E.
+        type: string
+        default: ""
+      artefactos:
+        description: Rutas (una por línea) que se suben SOLO si algo falla, por 3 días.
+        type: string
+        default: ""
+      timeout:
+        description: Minutos máximos del trabajo.
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build y pruebas rápidas
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout }}
+    concurrency:
+      group: hms-ci-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.lockfile }}
+
+      - if: inputs.php
+        uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
+        with:
+          php-version: ${{ inputs.php-version }}
+          extensions: ${{ inputs.php-extensions }}
+          coverage: none
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Revisiones rápidas
+        run: ${{ inputs.comandos }}
+
+      - name: Caché de Chromium (llave = lockfile)
+        if: inputs.playwright
+        id: pw-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles(inputs.lockfile) }}
+
+      - name: Instalar Chromium
+        if: inputs.playwright && steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Dependencias del sistema para Chromium (caché encontrada)
+        if: inputs.playwright && steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Pruebas E2E
+        if: inputs.e2e != ''
+        env:
+          CI: true
+        run: ${{ inputs.e2e }}
+
+      - name: Subir informes (solo si falló)
+        if: failure() && inputs.artefactos != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-informes
+          path: ${{ inputs.artefactos }}
+          retention-days: 3
+          if-no-files-found: ignore
