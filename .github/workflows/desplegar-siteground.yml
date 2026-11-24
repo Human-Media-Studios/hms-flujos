@@ -132,7 +132,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+          # En un runner propio la caché de npm ya vive en la máquina: bajar la de GitHub (unos 3 GB) es más lento.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: ${{ inputs.lockfile }}
 
       - name: Instalar dependencias
@@ -201,6 +202,7 @@ jobs:
             [ -n "$patron" ] && args+=("--exclude=$patron")
           done <<< "$EXCLUIR"
 
+          echo "rsync: $(command -v rsync) ($(rsync --version | head -1))"
           rsync -az --stats ${args[@]+"${args[@]}"} -e "$RSH" "$ORIGEN" "$SSH_DEST:$DOCROOT/"
           echo "::notice::Sitio subido a $DOCROOT"
 
