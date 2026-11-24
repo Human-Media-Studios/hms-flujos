@@ -46,6 +46,12 @@ on:
         description: Rutas (una por línea) que se suben SOLO si algo falla, por 3 días.
         type: string
         default: ""
+      runner:
+        description: >-
+          Dónde corre el trabajo, en JSON. Por defecto la máquina de GitHub ("ubuntu-latest").
+          Un runner propio no gasta minutos de Actions, p. ej. '["self-hosted","hca-mac"]'.
+        type: string
+        default: '"ubuntu-latest"'
       timeout:
         description: Minutos máximos del trabajo.
         type: number
@@ -57,7 +63,7 @@ permissions:
 jobs:
   ci:
     name: Build y pruebas rápidas
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: ${{ inputs.timeout }}
     concurrency:
       group: hms-ci-${{ github.workflow }}-${{ github.ref }}
@@ -71,7 +77,8 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ inputs.lockfile }}
 
-      - if: inputs.php
+      # En un runner propio se usa el PHP ya instalado en la máquina (no se toca el sistema).
+      - if: inputs.php && runner.environment == 'github-hosted'
         uses: shivammathur/setup-php@bf6b4fbd49ca58e4608c9c89fba0b8d90bd2a39f # 2.35.5
         with:
           php-version: ${{ inputs.php-version }}
@@ -84,8 +91,12 @@ jobs:
       - name: Revisiones rápidas
         run: ${{ inputs.comandos }}
 
+      - name: Revisar PHP del runner propio
+        if: inputs.php && runner.environment != 'github-hosted'
+        run: php -v
+
       - name: Caché de Chromium (llave = lockfile)
-        if: inputs.playwright
+        if: inputs.playwright && runner.os == 'Linux'
         id: pw-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -93,12 +104,17 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles(inputs.lockfile) }}
 
       - name: Instalar Chromium
-        if: inputs.playwright && steps.pw-cache.outputs.cache-hit != 'true'
+        if: inputs.playwright && runner.os == 'Linux' && steps.pw-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
       - name: Dependencias del sistema para Chromium (caché encontrada)
-        if: inputs.playwright && steps.pw-cache.outputs.cache-hit == 'true'
+        if: inputs.playwright && runner.os == 'Linux' && steps.pw-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
+
+      # macOS (runner propio): el navegador queda en la caché de la máquina; si ya está, no descarga nada.
+      - name: Chromium en macOS
+        if: inputs.playwright && runner.os != 'Linux'
+        run: npx playwright install chromium
 
       - name: Pruebas E2E
         if: inputs.e2e != ''
