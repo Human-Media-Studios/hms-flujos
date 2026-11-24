@@ -33,6 +33,12 @@ on:
       confirmacion:
         type: string
         default: ""
+      runner:
+        description: >-
+          Dónde corre el trabajo, en JSON. Por defecto la máquina de GitHub ("ubuntu-latest").
+          Un runner propio no gasta minutos de Actions, p. ej. '["self-hosted","hca-mac"]'.
+        type: string
+        default: '"ubuntu-latest"'
       node-version:
         type: string
         default: "22"
@@ -96,7 +102,7 @@ permissions:
 jobs:
   desplegar:
     name: Desplegar a ${{ inputs.destino }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 15
     # Los despliegues van en fila: nunca se cancela uno a medias.
     concurrency:
@@ -144,6 +150,8 @@ jobs:
           find "$ORIGEN" -type f -exec chmod 644 {} +
           find "$ORIGEN" -type d -exec chmod 755 {} +
 
+      # La llave y la huella van en una carpeta temporal del trabajo, nunca en ~/.ssh: en un runner
+      # propio, ~/.ssh es la del dueño de la máquina y no se toca. Se borran al terminar.
       - name: Preparar SSH
         env:
           SSH_KEY: ${{ secrets.ssh-key }}
@@ -151,17 +159,20 @@ jobs:
         run: |
           set -euo pipefail
           : "${SSH_KEY:?falta el secret ssh-key}"
-          mkdir -p -m 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
+          D="$RUNNER_TEMP/hms-ssh"
+          mkdir -p "$D" && chmod 700 "$D"
+          printf '%s\n' "$SSH_KEY" > "$D/id_deploy"
+          chmod 600 "$D/id_deploy"
+          echo "SSH_DIR=$D" >> "$GITHUB_ENV"
           if [ -n "$KNOWN_HOSTS" ]; then
-            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
+            printf '%s\n' "$KNOWN_HOSTS" > "$D/known_hosts"
             echo "HOSTCHECK=yes" >> "$GITHUB_ENV"
           else
             echo "::warning::Sin huella fija del servidor (ssh-known-hosts): se acepta la primera vez."
+            : > "$D/known_hosts"
             echo "HOSTCHECK=accept-new" >> "$GITHUB_ENV"
           fi
+          chmod 600 "$D/known_hosts"
 
       - name: Subir el sitio (rsync SIN --delete)
         env:
@@ -181,7 +192,7 @@ jobs:
           : "${DOCROOT:?falta la ruta (input ruta o secret ruta)}"
           DOCROOT="${DOCROOT%/}"
           PORT="${SG_PORT:-18765}"
-          RSH="ssh -p $PORT -i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=$HOSTCHECK -o BatchMode=yes -o ConnectTimeout=25"
+          RSH="ssh -p $PORT -i $SSH_DIR/id_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=$HOSTCHECK -o BatchMode=yes -o ConnectTimeout=25"
           SSH_DEST="$SG_USER@$SG_HOST"
           export RSH SSH_DEST DOCROOT
 
@@ -190,7 +201,7 @@ jobs:
             [ -n "$patron" ] && args+=("--exclude=$patron")
           done <<< "$EXCLUIR"
 
-          rsync -az --stats "${args[@]}" -e "$RSH" "$ORIGEN" "$SSH_DEST:$DOCROOT/"
+          rsync -az --stats ${args[@]+"${args[@]}"} -e "$RSH" "$ORIGEN" "$SSH_DEST:$DOCROOT/"
           echo "::notice::Sitio subido a $DOCROOT"
 
           if [ -n "$DESPUES" ]; then
@@ -224,9 +235,9 @@ jobs:
             && echo "::notice::Cloudflare purgado." \
             || echo "::warning::La purga de Cloudflare no confirmó éxito."
 
-      - name: Borrar la llave del runner
+      - name: Borrar la llave del trabajo
         if: always()
-        run: rm -f ~/.ssh/id_deploy
+        run: rm -rf "$RUNNER_TEMP/hms-ssh"
 
       - name: Resumen
         env:
